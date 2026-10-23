@@ -64,3 +64,51 @@ Server aapalante Ctrl + C.
 ### Interview questions
 - **Q: `package-lock.json` enduku commit cheyyali?** (nee answer raayi)
 - **Q: `/health` endpoint enduku?** (nee answer raayi)
+
+---
+
+## Phase 2 + 3: Dockerfile + CI (build, smoke test, scan)
+
+### Mac lo Docker lekunda image ela build chesam?
+- GitHub Actions runner (`ubuntu-latest`) lo **Docker already install ayyi untundi**.
+- Mac lo Dockerfile (text recipe) raasi push chesthe, runner `docker build` chestundi.
+- Runner pani ayyaka delete avutundi, image kuda pothundi. Anduke tarvata **ECR** ki push chestam (save).
+- Analogy: Dockerfile = cake recipe. Runner = bakery kitchen (oven = Docker). ECR = fridge.
+
+### Dockerfile key points
+| Line / idea | Enduku |
+|---|---|
+| `node:24-alpine` | Chinna image. Node 20 April 2026 lo end-of-life |
+| `COPY package*.json` mundu, `COPY src` tarvata | **Layer caching**: code maarithe dependencies layer reuse, build fast |
+| `npm ci --omit=dev` | Lock file exact versions, dev deps lekunda |
+| **Multi-stage** (`AS deps`, then final stage) | npm build stage lo matrame. Final image lo npm ledu |
+| `rm -rf .../npm ...` | Runtime ki npm avasaram ledu. Remove chesthe vulnerabilities pothayi, image chinnadi |
+| `USER node` | **Non-root**. Container hack ayina root power undadu |
+| `.dockerignore` | `node_modules`, `.git`, tests image loki vellavu. Chinna, safe |
+
+### CI workflow (`.github/workflows/ci.yml`)
+```
+test (npm ci + npm test) ──needs──► docker (build -> run -> curl /health -> Trivy)
+```
+- `needs: test`: tests fail ayithe image build cheyyadu.
+- Image tag = `${{ github.sha }}` (git commit SHA). `latest` vaadamu: ye version o teliyadu.
+- **Smoke test**: container nijanga start ayyi `/health`, `/add` answer chestundo real call.
+- `if: failure()`: fail ayithe container logs chupistundi.
+- **Trivy**: HIGH / CRITICAL unte `--exit-code 1`, pipeline fail. `--ignore-unfixed` = fix inka release avvani vaati valla fail cheyyadu. Scanner version pinned (`aquasec/trivy:0.58.0`).
+
+### Error: Trivy failed, 3 HIGH vulnerabilities
+- **Situation:** first CI run lo test ✅, build ✅, smoke test ✅, **Trivy ❌**.
+- **Trivy cheppindi:** `brace-expansion` (2 CVEs), `undici` (1 CVE), anni HIGH, "fixed" versions available.
+- **Investigation:** mana `package-lock.json` lo ee packages **levu** (`grep` = 0). Ante mana app kaadu.
+  Avi base image lo unna **npm tool** lopala bundled packages (`/usr/local/lib/node_modules/npm`).
+- **Fix:** multi-stage Dockerfile. npm tho dependencies stage 1 lo install, final image lo npm / npx / corepack / yarn **delete**. App ki runtime lo `node` matrame kavali.
+- **Result:** Trivy `Total: 0`, pipeline green.
+- **Lesson:**
+  1. Vulnerability vachinappudu mundu **"ee package ekkadi nunchi vachindi?"** chudali: mana dependency aa, base image aa, OS package aa.
+  2. Final image lo **runtime ki kavalsinavi matrame** undali (minimal image = thakkuva attack surface).
+  3. Fix options order: upgrade / remove > base image update > `.trivyignore` (reason tho, last option).
+
+### Interview questions
+- **Q: Multi-stage Docker build enduku?** Build tools (npm, compilers) final image lo undakudadu. Image chinnadi, vulnerabilities thakkuva.
+- **Q: Trivy HIGH vulnerability report chesindi, mana code lo aa package ledu. Emi chestav?** (nee answer raayi)
+- **Q: Image tag ki `latest` enduku vaadakudadu?** (nee answer raayi)
