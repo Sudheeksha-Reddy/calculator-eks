@@ -12,6 +12,29 @@ merge to main -> build -> scan -> push ECR -> deploy EKS "dev" (CD, automatic)
 tag v1.0.0    -> [MY APPROVAL] -> deploy SAME image to "prod"
 ```
 
+**Okka line lo motham idea:** developer code raasina ventane, automatic ga test ayyi, box (image) lo packed ayyi,
+scan ayyi, safe ga store ayyi, approval tho servers meeda run avvali. Manishi marchipoyina, mistake chesina,
+broken leda insecure code users daaka vellakudadu.
+
+## Motham journey: prathi step ki PROBLEM -> SOLUTION (10 years tarvata ide mundu chadavu)
+| # | Problem (idi lekapothe emi jarugutundi) | Solution | Project |
+|---|---|---|---|
+| 1 | Code correct aa ani manishi manual ga check cheyyali, miss avutundi | Tests (`npm test`) | A |
+| 2 | Code laptop lo matrame, laptop pothe code pothundi | GitHub repo | A |
+| 3 | Developers tests run cheyyadam marchipotaru, "naa laptop lo work avtundi" | CI (GitHub Actions, fresh machine) | A |
+| 4 | CI red unna evaraina merge click cheyyochu | Ruleset (PR + required `test` check) | A |
+| 5 | Functions matrame, users / browser call cheyyaleru | Express API (`/add`, `/health`, `/version`) | B |
+| 6 | "Naa machine lo work avtundi, server lo avvadu" | Docker image (app + Node + deps okka box) | B |
+| 7 | Image build ayyindi kani app start avutundo teliyadu | Smoke test (container run + `curl /health`) | B |
+| 8 | Image lo security holes | Trivy scan + multi-stage (npm remove) | B |
+| 9 | AWS resources marchipothe surprise bill | Budget alert ($5) | B |
+| 10 | Image runner tho paatu delete avutundi | ECR (image store) | B |
+| 11 | AWS access keys GitHub lo pedithe leak risk | OIDC + IAM role (temporary credentials) | B |
+| 12 | App run avvadaniki servers kavali, crash ayithe restart | EKS (Kubernetes) | B |
+| 13 | Prathi merge ki manual deploy, slow + mistakes | CD: auto deploy to `dev` | B |
+| 14 | Untested code prod ki velithe users ki problem | Same image + manual approval for `prod` | B |
+| 15 | Kotha version lo bug | Rollback (old image tag) | B |
+
 ## Order enduku ila? ("free and local first, paid and cloud last")
 | Order | Phase | AWS kavala? | Cost |
 |---|---|---|---|
@@ -112,3 +135,135 @@ test (npm ci + npm test) ──needs──► docker (build -> run -> curl /heal
 - **Q: Multi-stage Docker build enduku?** Build tools (npm, compilers) final image lo undakudadu. Image chinnadi, vulnerabilities thakkuva.
 - **Q: Trivy HIGH vulnerability report chesindi, mana code lo aa package ledu. Emi chestav?** (nee answer raayi)
 - **Q: Image tag ki `latest` enduku vaadakudadu?** (nee answer raayi)
+
+---
+
+## Phase 4: Budget alert
+- **Problem:** AWS lo resources (EKS laantivi) delete marchipothe nelaki ~$150 bill.
+- **Emi:** AWS Budgets lo `practice-5usd`: monthly $5. Actual > 80% ($4) aithe email, Forecast > 100% (month end ki $5 daatutundi ani AWS guess) aithe email.
+- **Gurtu:** budget **email matrame** pampistundi, resources ni aapadu. Delete cheyyadam mana pani.
+
+---
+
+## Phase 5: ECR (Elastic Container Registry)
+
+### ECR ante enti?
+**ECR = AWS lo Docker images store chese private godown.**
+
+| Concept | Ardham |
+|---|---|
+| Registry | Images store chese service (ECR, Docker Hub, GHCR) |
+| Repository | Registry lopala **okka app** images ki folder. Manadi `calculator-eks` |
+| Image tag | Prathi image version ki peru. Manam **git commit SHA** vaadutunnam |
+
+```
+ECR (registry, naa AWS account, Mumbai region)
+└── calculator-eks          <- repository (mana app)
+    ├── 2478224...          <- image (commit 1)
+    ├── 418e5b2...          <- image (commit 2)
+    └── ...
+```
+
+### ECR lekapothe problem enti?
+GitHub runner lo image build avutundi. Runner pani ayyaka **delete**, image kuda pothundi.
+```
+Runner: build OK -> test OK -> scan OK -> runner DELETE -> image GONE
+```
+EKS deploy cheyyali ante image ekkadaina **permanent ga** undali. Anduke ECR.
+
+### ECR vs Docker Hub (enduku ECR?)
+| | Docker Hub (free) | ECR |
+|---|---|---|
+| Private | Limited | Private by default |
+| EKS tho connection | Username / password secret kavali | **IAM** tho direct, passwords levu |
+| Pull speed | Internet nunchi | Same AWS region, fast |
+| Pull limits | Rate limits untayi | Levu |
+
+### Command 1: Repository create
+```bash
+aws ecr create-repository \
+  --repository-name calculator-eks \
+  --image-tag-mutability IMMUTABLE \
+  --image-scanning-configuration scanOnPush=true \
+  --query 'repository.repositoryUri' --output text
+```
+| Part | Emi | Problem solve |
+|---|---|---|
+| `create-repository` | ECR lo kotha folder | Image save cheyyadaniki place |
+| `--repository-name calculator-eks` | Folder peru | App peru tho match |
+| `--image-tag-mutability IMMUTABLE` | Tag okasari push ayithe overwrite cheyyalevu | Kinda chudu |
+| `scanOnPush=true` | Push ayyinappudu AWS automatic scan | Kinda chudu |
+| `--query ... --output text` | Output lo repo address (URI) matrame | Long JSON avasaram ledu |
+
+Output = image **full address** (URI):
+```
+<account-id>.dkr.ecr.ap-south-1.amazonaws.com/calculator-eks
+ mee account   ECR   Mumbai region             repo
+```
+CI push chesetappudu, EKS pull chesetappudu ide address.
+
+### IMMUTABLE tags (chala important)
+**MUTABLE lo problem:**
+1. Monday: `v1` tag tho image A push, prod lo deploy.
+2. Tuesday: evaro `v1` tag tho **different** image B push (mistake / attack).
+3. Prod pod restart ayithe `v1` pull chesthe **image B** vastundi. Evaru deploy cheyyakunda prod maaripoyindi.
+
+**IMMUTABLE tho:** step 2 lo ECR reject: "tag already exists".
+- **Relief:** same tag = eppudu same image. Prod lo emi run avutundo exact ga telustundi, rollback reliable.
+- Mana tags = git SHA (prathi commit ki unique), kabatti conflict ledu.
+- Analogy: bank cheque number. Okasari issue ayina number ki malli inko cheque ivvaru.
+
+### scanOnPush
+- Image ECR ki vachinappudu AWS **basic scan** (OS packages). Free.
+- Trivy unna enduku? **Defense in depth** (rendu layers):
+  - Trivy (CI lo) = push **mundu** block.
+  - ECR scan = push **tarvata** registry lo record, Console lo chudochu.
+- Analogy: airport security check (Trivy) + boarding gate daggara malli check (ECR).
+
+### Command 2: Lifecycle policy (old images auto delete)
+```bash
+aws ecr put-lifecycle-policy --repository-name calculator-eks --lifecycle-policy-text '{
+  "rules":[{"rulePriority":1,"description":"Keep last 10 images",
+    "selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":10},
+    "action":{"type":"expire"}}]}'
+```
+| Part | Ardham |
+|---|---|
+| `rulePriority: 1` | Rules order (okkate rule) |
+| `tagStatus: any` | Tagged / untagged anni images |
+| `imageCountMoreThan: 10` | 10 kanna ekkuva unte |
+| `action: expire` | Old images delete, latest 10 untayi |
+
+- **Problem:** prathi commit ki kotha image. Months lo vandala images, storage bill.
+- **Relief:** automatic cleanup. Last 10 rollback ki saripotayi.
+- Real company: prod images delete avvakudadu, kabatti `v*` tags ki separate rule (ex: last 50) pedataru.
+
+### ECR state (verify chesina)
+| Setting | Value |
+|---|---|
+| Repository | `calculator-eks` |
+| Region | `ap-south-1` (Mumbai) |
+| Tag mutability | IMMUTABLE |
+| Scan on push | True |
+| Lifecycle | Keep last 10 |
+
+Verify commands:
+```bash
+aws ecr describe-repositories --query 'repositories[].{name:repositoryName,mutability:imageTagMutability,scan:imageScanningConfiguration.scanOnPush}' --output table
+aws ecr get-lifecycle-policy --repository-name calculator-eks --query lifecyclePolicyText --output text
+aws ecr describe-images --repository-name calculator-eks --output table
+```
+
+### ECR ni evaru vaadutaru
+```
+GitHub Actions --PUSH--> ECR calculator-eks --PULL--> EKS nodes
+ (OIDC role: ECR push permission)       (node role: ECR read permission)
+```
+Push and pull ki **separate permissions**. Rendu different identities.
+
+### Interview questions (ECR)
+1. **Why IMMUTABLE tags?** Same tag = same image eppudu. Prod silent ga maaradu, rollback reliable.
+2. **Why lifecycle policy?** Storage cost control, old images auto delete.
+3. **ECR vs Docker Hub?** Private, IAM auth (no passwords), same region fast pulls, no rate limits.
+4. **Trivy unna scanOnPush enduku?** Defense in depth: CI lo block, registry lo record.
+5. **EKS ECR nunchi pull ela chestundi, password lekunda?** Node IAM role ki ECR read permission.
